@@ -4,7 +4,7 @@
 //+---------------------------------------------------------------------------+
 #property copyright "Copyright 2024, Yohan Naftali"
 #property link      "https://github.com/yohannaftali"
-#property version   "240.320"
+#property version   "240.328"
 
 // CTrade
 #include <Trade\Trade.mqh>
@@ -27,7 +27,8 @@ input double multiplierVolume = 1.6; // Size Multiplier
 input int maximumStep = 15;          // Maximum Step
 
 input group "Take Profit";
-input double targetProfit = 90;      // Target Profit USD/lot
+input double targetProfit = 10;       // Target Profit USD per Group
+input double targetProfitPercent = 0; // Alternative: Target Profit by Percentage (%)
 
 input group "Deviation Grid Step";
 input double deviationStep = 0.04;   // Minimum Price Deviation Step (%)
@@ -37,6 +38,7 @@ input group "New Order Condition";
 input ENUM_TIMEFRAMES timeframe = PERIOD_M5; // Timeframe Period
 input int greenPeriod = 1;                   // Green Period
 input int redPeriod = 3;                     // Red Period
+input bool restrictHigherGreen = true;       // Restrict Higher Highest Green of Highest Red Bars
 
 // Variables
 int currentStep = 0;
@@ -70,6 +72,14 @@ int OnInit() {
   Print("- Maximum Step: " + IntegerToString(maximumStep));
   Print("- Maximum Volume:" + DoubleToString(maximumVolume(), 2) + " lot");
 
+  Print("# New Order Condition");
+  Print("- After n red bars following with m green bars");
+  Print("- Timeframe Period: " + EnumToString(timeframe));
+  Print("- Green Period (m): " + IntegerToString(greenPeriod));
+  Print("- Red Period (n): " + IntegerToString(redPeriod));
+  Print("- Total Period: " + IntegerToString(totalPeriod));
+  Print("- Restrict Higher H Green Bar > H Red Bars: " + (restrictHigherGreen ? "true" : "false"));
+
   calculatePosition();
   return (INIT_SUCCEEDED);
 }
@@ -82,6 +92,7 @@ void OnTick() {
     if(!isNewBar()) return;
     if(!priceActionTrigger()) return;
     // Open first order
+    Print("* Price action trigered ******");
     openTrade();
     return;
   }
@@ -100,7 +111,8 @@ void OnTick() {
 void openTrade() {
   double ask = SymbolInfoDouble(Symbol(), SYMBOL_ASK);
   string msg = "Buy step #" + IntegerToString(currentStep+1);
-  double tp = NormalizeDouble(ask + (nextSumVolume*targetProfit), Digits());
+  double target = targetProfit > 0 ? ask + targetProfit : ask * (1 + (targetProfitPercent/100));
+  double tp = NormalizeDouble(target, Digits());
   bool buy = trade.Buy(nextOpenVolume, Symbol(), 0.0, 0.0, tp, msg);
   if(!buy) {
     Print(trade.ResultComment());
@@ -117,7 +129,7 @@ void OnTrade() {
   if(positionLast == pos) return;
   positionLast = pos;
   if(pos > 0) return;
-  Print("* Take Profit Event");
+  Print("* Take Profit Event ******");
   Print("# Recalculate Position");
   calculatePosition();
 }
@@ -184,8 +196,8 @@ void calculatePosition() {
   double minimumDistancePercentage = (deviationStep + ((currentStep-1) * deviationStep * multiplierStep));
   double minimumDistancePrice = averagePrice * minimumDistancePercentage / 100;
   minimumAskPrice = NormalizeDouble(averagePrice - minimumDistancePrice, Digits());
-  double profit = targetProfit*sumVolume;
-  takeProfitPrice = NormalizeDouble(averagePrice + profit, Digits());
+  double target = targetProfit > 0 ? averagePrice + targetProfit : averagePrice * (1 + (targetProfitPercent/100));
+  takeProfitPrice = NormalizeDouble(target, Digits());
 
   Print("- Take Profit Price: " + DoubleToString(takeProfitPrice, 2));
   Print("- Minimum Distance to Open New Trade: " + DoubleToString(minimumDistancePercentage, 2) + "% = " + DoubleToString(minimumDistancePrice, 2) );
@@ -203,7 +215,8 @@ void adjustTakeProfit() {
   if(takeProfitPrice < ask) {
     Print("- Current Take Profit: " + DoubleToString(takeProfitPrice, 2));
     Print("- Ask: " + DoubleToString(ask, 2));
-    takeProfitPrice = NormalizeDouble(ask + (nextSumVolume*targetProfit), 2);
+    double target = targetProfit > 0 ? ask + targetProfit : ask * (1 + (targetProfitPercent/100));
+    takeProfitPrice = NormalizeDouble(target, 2);
     Print("- Adjust Take Profit: " + DoubleToString(takeProfitPrice, 2));
   }
 
@@ -236,22 +249,38 @@ double maximumVolume() {
 //|                                                                  |
 //+------------------------------------------------------------------+
 bool priceActionTrigger() {
-  for(int i=1; i<= greenPeriod; i++) {
-    double open = iOpen(Symbol(), timeframe, i);
-    double close = iClose(Symbol(), timeframe, i);
+  double highestGreen = 0;
+  for(int i = 1; i <= greenPeriod; i++) {
+    double open = iOpen(NULL, timeframe, i);
+    double close = iClose(NULL, timeframe, i); 
     if(open > close) {
       // Open > Close = red candle, return false
       return false;
     }
+    double high = iHigh(NULL, timeframe, i);
+    if(high > highestGreen) {
+        highestGreen = high;
+    }
   }
-  for(int i=(greenPeriod+1); i<= totalPeriod; i++) {
-    double open = iOpen(Symbol(), timeframe, i);
-    double close = iClose(Symbol(), timeframe, i);
+  
+  double highestRed = 0;
+  for(int i = (greenPeriod+1); i <= totalPeriod; i++) {
+    double open = iOpen(NULL, timeframe, i);
+    double close = iClose(NULL, timeframe, i);
     if(open < close) {
       // Open < Close = gren candle, return false
       return false;
     }
+    double high = iHigh(NULL, timeframe, i);
+    if(high > highestRed) {
+        highestRed = high;
+    }
   }
+  
+  if(restrictHigherGreen && highestRed < highestGreen) {
+    return false;
+  }
+  
 // Green = greenPeriod and Red = redPeriod true
   return true;
 }
@@ -261,6 +290,6 @@ bool priceActionTrigger() {
 //+------------------------------------------------------------------+
 bool isNewBar() {
   static datetime lastBar;
-  return lastBar != (lastBar = iTime(_Symbol, timeframe, 0));
+  return lastBar != (lastBar = iTime(Symbol(), timeframe, 0));
 }
 //+------------------------------------------------------------------+
